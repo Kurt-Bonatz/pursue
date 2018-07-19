@@ -1,0 +1,25 @@
+---
+name: pursue
+version: "0.0.1"
+author: Kurt B. <kurt.bonatz@gmail.com>
+about: A simple command line prompt inspired by pure, but written in rust.
+subcommands:
+  - precmd:
+      about: The top line of the prompt.
+      args:
+        - shorten:
+            short: s
+            long: shorten
+            help: Shortens the non-current directory names in the path.
+  - prompt:
+      about: The main line of the prompt where you type commands.
+      args:
+        - return_code:
+            short: r
+            long: return_code
+            help: The return code of the last instruction
+            takes_value: true
+        - keymap:
+            short: k
+            long: keymap
+            help: The current keymap usually stored in $KEYMAP
