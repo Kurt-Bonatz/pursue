@@ -1,3 +1,4 @@
+use ansi_term::Colour::{Blue, Cyan, Fixed};
 use clap::ArgMatches;
 use dirs;
 use git2::{ErrorCode, Repository, Status, StatusOptions};
@@ -19,32 +20,41 @@ struct PrePrompt {
 
 impl fmt::Display for PrePrompt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let gray = Fixed(242);
         // Always write the path
-        write!(f, "{}", self.path)?;
+        write!(f, "\n{}", Blue.paint(&self.path))?;
 
         // Write out the branch name if we are in a VCS directory.
         if !self.vcs_branch.is_empty() {
-            write!(f, " {}", self.vcs_branch)?;
+            let mut branch = self.vcs_branch.to_owned();
 
             // Print a star if the working directory is dirty.
             if self.vcs_is_dirty {
-                write!(f, "*")?;
+                branch.push('*')
             }
+            write!(f, " {}", gray.paint(branch))?;
 
             // Print arrows corresponding to whether or not we are out of date
             // or ahead of the branch's remote.
+            let mut arrows = String::new();
             if self.vcs_is_behind_remote {
-                write!(f, "⭭")?;
+                arrows.push('⇣');
             }
 
             if self.vcs_is_ahead_of_remote {
-                write!(f, "⭫")?;
+                arrows.push('⇡');
+            }
+
+            if !arrows.is_empty() {
+                write!(f, " {}", Cyan.paint(arrows))?;
             }
         }
 
         // Write out the host name in the form user@host if both are set.
         if !self.user_name.is_empty() && !self.host.is_empty() {
-            write!(f, " {}@{}", self.user_name, self.host)?;
+            let ssh_info = gray.paint(format!("{}@{}", self.user_name, self.host));
+
+            write!(f, " {}", ssh_info)?;
         }
 
         Ok(())
@@ -102,13 +112,11 @@ fn is_dirty(repo: &Repository) -> bool {
 /// (false, false) will be returned.
 fn is_ahead_behind_remote(repo: &Repository) -> (bool, bool) {
     let head = repo.revparse_single("HEAD").unwrap().id();
-    if let Some((upstream, _)) = repo.revparse_ext("@{u}").ok() {
-        return match repo.graph_ahead_behind(head, upstream.id()) {
-            Ok((commits_ahead, commits_behind)) => (commits_ahead > 0, commits_behind > 0),
-            Err(_) => (false, false),
-        };
-    }
-    (false, false)
+    repo.revparse_ext("@{u}")
+        .ok()
+        .and_then(|(upstream, _)| repo.graph_ahead_behind(head, upstream.id()).ok())
+        .map(|(ahead, behind)| (ahead > 0, behind > 0))
+        .unwrap_or((false, false))
 }
 
 /// Prints out the pre-command line of the prompt.
@@ -145,7 +153,7 @@ crate fn render(sub_matchings: &ArgMatches<'_>) {
         precmd.vcs_is_behind_remote = behind;
     }
 
-    println!("{}", precmd);
+    print!("{}", precmd);
 }
 
 #[cfg(test)]
@@ -167,7 +175,10 @@ mod tests {
             vcs_is_ahead_of_remote: false,
         };
 
-        assert_eq!("~/some/dir".to_owned(), format!("{}", precmd));
+        assert_eq!(
+            format!("{}", Blue.paint("~/some/dir")),
+            format!("{}", precmd)
+        );
     }
 
     #[test]
@@ -182,7 +193,10 @@ mod tests {
             vcs_is_ahead_of_remote: false,
         };
 
-        assert_eq!("~/some/dir".to_owned(), format!("{}", precmd));
+        assert_eq!(
+            format!("{}", Blue.paint("~/some/dir")),
+            format!("{}", precmd)
+        );
     }
 
     #[test]
@@ -197,7 +211,10 @@ mod tests {
             vcs_is_ahead_of_remote: false,
         };
 
-        assert_eq!("~ user@host".to_owned(), format!("{}", precmd));
+        assert_eq!(
+            format!("{} {}", Blue.paint("~"), Fixed(242).paint("user@host")),
+            format!("{}", precmd)
+        );
     }
 
     #[test]
@@ -212,7 +229,15 @@ mod tests {
             vcs_is_ahead_of_remote: false,
         };
 
-        assert_eq!("~ master user@host".to_owned(), format!("{}", precmd));
+        assert_eq!(
+            format!(
+                "{} {} {}",
+                Blue.paint("~"),
+                Fixed(242).paint("master"),
+                Fixed(242).paint("user@host")
+            ),
+            format!("{}", precmd)
+        );
     }
 
     #[test]
@@ -227,7 +252,15 @@ mod tests {
             vcs_is_ahead_of_remote: false,
         };
 
-        assert_eq!("~ master* user@host".to_owned(), format!("{}", precmd));
+        assert_eq!(
+            format!(
+                "{} {} {}",
+                Blue.paint("~"),
+                Fixed(242).paint("master*"),
+                Fixed(242).paint("user@host")
+            ),
+            format!("{}", precmd)
+        );
     }
 
     #[test]
@@ -243,7 +276,13 @@ mod tests {
         };
 
         assert_eq!(
-            "~ master*⭭⭫ user@host".to_owned(),
+            format!(
+                "{} {} {} {}",
+                Blue.paint("~"),
+                Fixed(242).paint("master*"),
+                Cyan.paint("⇣⇡"),
+                Fixed(242).paint("user@host")
+            ),
             format!("{}", precmd)
         );
     }
