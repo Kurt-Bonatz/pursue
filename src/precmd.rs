@@ -1,4 +1,4 @@
-use ansi_term::Colour::{Blue, Cyan, Fixed};
+use ansi_term::Colour::{Blue, Cyan, Fixed, White};
 use clap::ArgMatches;
 use dirs;
 use git2::{ErrorCode, Repository, Status, StatusOptions};
@@ -9,18 +9,30 @@ use std::fs::File;
 use std::io::prelude::*;
 use tico::tico;
 
+#[derive(Debug, PartialEq)]
 struct SshInfo {
     user: String,
+    is_root: bool,
     host: String,
 }
 
 impl fmt::Display for SshInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let gray = Fixed(242);
-        write!(f, "{}", gray.paint(format!("{}@{}", self.user, self.host)))
+        if !self.is_root {
+            write!(f, "{}", gray.paint(format!("{}@{}", self.user, self.host)))
+        } else {
+            write!(
+                f,
+                "{}{}",
+                White.paint(&self.user),
+                gray.paint(format!("@{}", self.host))
+            )
+        }
     }
 }
 
+#[derive(Debug, PartialEq)]
 struct VcsInfo {
     branch: String,
     is_dirty: bool,
@@ -48,6 +60,7 @@ impl fmt::Display for VcsInfo {
     }
 }
 
+#[derive(Debug, PartialEq)]
 struct PrePrompt {
     path: String,
     vcs_info: Option<VcsInfo>,
@@ -105,8 +118,16 @@ fn get_ssh_info() -> Option<SshInfo> {
     let mut host = String::new();
     file.read_to_string(&mut host).ok()?;
 
-    match (env::var("SSH_CONNECTION"), env::var("USER")) {
-        (Ok(_), Ok(user)) => Some(SshInfo { user, host }),
+    match (
+        env::var("SSH_CONNECTION"),
+        env::var("USER"),
+        env::var("UID"),
+    ) {
+        (Ok(_), Ok(user), Ok(uid)) => Some(SshInfo {
+            user,
+            is_root: uid == "0",
+            host,
+        }),
         _ => None,
     }
 }
@@ -221,6 +242,7 @@ mod tests {
         precmd.path = String::from("~");
         precmd.ssh_info = Some(SshInfo {
             user: String::from("user"),
+            is_root: false,
             host: String::from("host"),
         });
 
@@ -236,6 +258,7 @@ mod tests {
         precmd.path = String::from("~");
         precmd.ssh_info = Some(SshInfo {
             user: String::from("user"),
+            is_root: false,
             host: String::from("host"),
         });
         precmd.vcs_info = Some(VcsInfo {
@@ -253,6 +276,24 @@ mod tests {
                 Fixed(242).paint("user@host")
             ),
             format!("{}", precmd)
+        );
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // SshInfo formatting tests
+    ////////////////////////////////////////////////////////////////////////////////
+
+    #[test]
+    fn ssh_info_prints_root_as_white() {
+        let ssh_info = SshInfo {
+            user: String::from("user"),
+            is_root: true,
+            host: String::from("host"),
+        };
+
+        assert_eq!(
+            format!("{}{}", White.paint("user"), Fixed(242).paint("@host")),
+            format!("{}", ssh_info)
         );
     }
 
@@ -338,6 +379,57 @@ mod tests {
         let long = format_path("home/user/Really/long/path", "home/user", true);
         assert_eq!(long, "~/R/l/path");
     }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // SSH info tests
+    ////////////////////////////////////////////////////////////////////////////////
+
+    #[test]
+    fn ssh_info_returns_basic_user_host_info() {
+        // Set up our env variables
+        if env::var("SSH_CONNECTION").is_err() {
+            env::set_var("SSH_CONNECTION", "pursue_test_val");
+        }
+        env::set_var("USER", "pursue");
+        env::set_var("UID", "1000");
+
+        if let Some(host) = get_hostname() {
+            assert_eq!(
+                get_ssh_info().unwrap(),
+                SshInfo { user: String::from("pursue"), is_root: false, host }
+            );
+        } else {
+            assert!(get_ssh_info().is_none());
+        }
+    }
+
+    // These are currently super flaky since cargo test operates in parallel and we
+    // are changing environment variables and expect a serial environment.
+    //
+    // #[test]
+    // fn ssh_info_returns_none_for_no_ssh_connection() {
+    //     env::remove_var("SSH_CONNECTION");
+    //     assert!(get_ssh_info().is_none());
+    // }
+
+    // #[test]
+    // fn ssh_info_detects_root() {
+    //     if env::var("SSH_CONNECTION").is_err() {
+    //         env::set_var("SSH_CONNECTION", "pursue_test_val");
+    //     }
+    //     env::set_var("USER", "pursue");
+    //     env::set_var("UID", "0");
+    //     assert_eq!(env::var("UID"), Ok("0".to_string()));
+
+    //     if let Some(host) = get_hostname() {
+    //         assert_eq!(
+    //             get_ssh_info().unwrap(),
+    //             SshInfo { user: String::from("pursue"), is_root: true, host }
+    //         );
+    //     } else {
+    //         assert!(get_ssh_info().is_none());
+    //     }
+    // }
 
     ////////////////////////////////////////////////////////////////////////////////
     // Git tests
@@ -441,6 +533,17 @@ mod tests {
 
         // The "local" branch should now have a commit ahead of the "remote"
         assert_eq!(is_ahead_behind_remote(&repo), (true, true));
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Helper methods
+    ////////////////////////////////////////////////////////////////////////////////
+
+    fn get_hostname() -> Option<String> {
+        let mut file = File::open("/etc/hostname").ok()?;
+        let mut host = String::new();
+        file.read_to_string(&mut host).ok()?;
+        Some(host)
     }
 
     fn temp_repo() -> (TempDir, Repository) {
