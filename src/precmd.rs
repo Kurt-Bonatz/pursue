@@ -5,6 +5,8 @@ use git2::{ErrorCode, Repository, Status, StatusOptions};
 use regex::Regex;
 use std::env;
 use std::fmt;
+use std::fs::File;
+use std::io::prelude::*;
 use tico::tico;
 
 struct SshInfo {
@@ -81,8 +83,8 @@ impl fmt::Display for PrePrompt {
     }
 }
 
-/// Formats the current path to replace the path of HOME with the usual '~' as
-/// well as sortens the directory names if requested.
+/// Formats the current path to replace the path of HOME with the usual '~' as well as sortens the
+/// directory names if requested.
 fn format_path(cwd: &str, home_dir: &str, shorten: bool) -> String {
     let path = Regex::new(home_dir).unwrap().replace(cwd, "~");
 
@@ -93,15 +95,18 @@ fn format_path(cwd: &str, home_dir: &str, shorten: bool) -> String {
     String::from(path)
 }
 
-/// Checks if there ssh connection, and returns `SshInfo` if the username and
-/// host name of the remote session are available.
+/// Checks if there ssh connection, and returns `SshInfo` if the username and host name of the
+/// remote session are available.
 fn get_ssh_info() -> Option<SshInfo> {
-    match (
-        env::var("SSH_CONNECTION"),
-        env::var("USER"),
-        env::var("HOSTNAME"),
-    ) {
-        (Ok(_), Ok(user), Ok(host)) => Some(SshInfo { user, host }),
+    // $HOSTNAME isn't a posix defined environment variable and sometimes doesn't exist when called
+    // from a new `sh` process instead of `bash` or `zsh` where it is often predefined. In order to
+    // still get the hostname, we'll just parse it directly from the hostname file.
+    let mut file = File::open("/etc/hostname").ok()?;
+    let mut host = String::new();
+    file.read_to_string(&mut host).ok()?;
+
+    match (env::var("SSH_CONNECTION"), env::var("USER")) {
+        (Ok(_), Ok(user)) => Some(SshInfo { user, host }),
         _ => None,
     }
 }
@@ -125,9 +130,8 @@ fn branch_name(repo: &Repository) -> String {
     }
 }
 
-/// Determines if the repository is in a dirty state, ignoring
-/// any files listed in .gitignore. Untracked files are also
-/// considered a dirty state.
+/// Determines if the repository is in a dirty state, ignoring any files listed in .gitignore.
+/// Untracked files are also considered a dirty state.
 fn is_dirty(repo: &Repository) -> bool {
     let mut options = StatusOptions::new();
     options.include_untracked(true);
@@ -145,11 +149,11 @@ fn is_dirty(repo: &Repository) -> bool {
         .any(|entry| !entry.status().is_empty() && !entry.status().intersects(clean_status))
 }
 
-/// Determine if the current HEAD is ahead/behind its remote. The tuple
-/// returned will be in the order ahead and then behind.
+/// Determine if the current HEAD is ahead/behind its remote. The tuple returned will be in the
+/// order ahead and then behind.
 ///
-/// If the remote is not set or doesn't exit (like a detached HEAD),
-/// (false, false) will be returned.
+/// If the remote is not set or doesn't exit (like a detached HEAD), (false, false) will be
+/// returned.
 fn is_ahead_behind_remote(repo: &Repository) -> (bool, bool) {
     let head = repo.revparse_single("HEAD").unwrap().id();
     repo.revparse_ext("@{u}")
@@ -163,8 +167,8 @@ fn is_ahead_behind_remote(repo: &Repository) -> (bool, bool) {
 ///
 /// This line will be printed in the order of path, git info, and ssh info.
 ///
-/// If the --shorten flag is set however, the non-current directories in the
-/// path will be shortened to their first character.
+/// If the --shorten flag is set however, the non-current directories in the path will be shortened
+/// to their first character.
 crate fn render(sub_matchings: &ArgMatches<'_>) {
     let mut precmd = PrePrompt::new();
 
@@ -187,7 +191,7 @@ crate fn render(sub_matchings: &ArgMatches<'_>) {
         });
     }
 
-    print!("{}", precmd);
+    println!("{}", precmd);
 }
 
 #[cfg(test)]
