@@ -7,54 +7,74 @@ use std::env;
 use std::fmt;
 use tico::tico;
 
-#[derive(Debug)]
+struct SshInfo {
+    user: String,
+    host: String,
+}
+
+impl fmt::Display for SshInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let gray = Fixed(242);
+        write!(f, "{}", gray.paint(format!("{}@{}", self.user, self.host)))
+    }
+}
+
+struct VcsInfo {
+    branch: String,
+    is_dirty: bool,
+    is_behind_remote: bool,
+    is_ahead_of_remote: bool,
+}
+
+impl fmt::Display for VcsInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let gray = Fixed(242);
+        let mut branch = self.branch.to_owned();
+
+        // Print a star if the working directory is dirty.
+        if self.is_dirty {
+            branch.push('*')
+        }
+        write!(f, "{}", gray.paint(branch))?;
+
+        match (self.is_behind_remote, self.is_ahead_of_remote) {
+            (true, true) => write!(f, " {}", Cyan.paint("⇣⇡")),
+            (true, false) => write!(f, " {}", Cyan.paint("⇣")),
+            (false, true) => write!(f, " {}", Cyan.paint("⇡")),
+            _ => Ok(()),
+        }
+    }
+}
+
 struct PrePrompt {
     path: String,
-    user_name: String,
-    host: String,
-    vcs_branch: String,
-    vcs_is_dirty: bool,
-    vcs_is_behind_remote: bool,
-    vcs_is_ahead_of_remote: bool,
+    vcs_info: Option<VcsInfo>,
+    ssh_info: Option<SshInfo>,
+}
+
+impl PrePrompt {
+    fn new() -> PrePrompt {
+        PrePrompt {
+            path: String::new(),
+            vcs_info: None,
+            ssh_info: None,
+        }
+    }
 }
 
 impl fmt::Display for PrePrompt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let gray = Fixed(242);
         // Always write the path
-        write!(f, "\n{}", Blue.paint(&self.path))?;
+        write!(f, "{}", Blue.paint(&self.path))?;
 
-        // Write out the branch name if we are in a VCS directory.
-        if !self.vcs_branch.is_empty() {
-            let mut branch = self.vcs_branch.to_owned();
-
-            // Print a star if the working directory is dirty.
-            if self.vcs_is_dirty {
-                branch.push('*')
-            }
-            write!(f, " {}", gray.paint(branch))?;
-
-            // Print arrows corresponding to whether or not we are out of date
-            // or ahead of the branch's remote.
-            let mut arrows = String::new();
-            if self.vcs_is_behind_remote {
-                arrows.push('⇣');
-            }
-
-            if self.vcs_is_ahead_of_remote {
-                arrows.push('⇡');
-            }
-
-            if !arrows.is_empty() {
-                write!(f, " {}", Cyan.paint(arrows))?;
-            }
+        // Write out the vcs info if we have it.
+        if let Some(vcs) = &self.vcs_info {
+            write!(f, " {}", vcs)?;
         }
 
-        // Write out the host name in the form user@host if both are set.
-        if !self.user_name.is_empty() && !self.host.is_empty() {
-            let ssh_info = gray.paint(format!("{}@{}", self.user_name, self.host));
-
-            write!(f, " {}", ssh_info)?;
+        // Write out the user and host name if we have them.
+        if let Some(info) = &self.ssh_info {
+            write!(f, " {}", info)?;
         }
 
         Ok(())
@@ -73,6 +93,23 @@ fn format_path(cwd: &str, home_dir: &str, shorten: bool) -> String {
     String::from(path)
 }
 
+/// Checks if there ssh connection, and returns `SshInfo` if the username and
+/// host name of the remote session are available.
+fn get_ssh_info() -> Option<SshInfo> {
+    match (
+        env::var("SSH_CONNECTION"),
+        env::var("USER"),
+        env::var("HOSTNAME"),
+    ) {
+        (Ok(_), Ok(user), Ok(host)) => Some(SshInfo { user, host }),
+        _ => None,
+    }
+}
+
+/// Finds the current branch name.
+///
+/// If the repository was just initialized and doesn't have any commits, "master" is returned.
+/// Otherwise any failure returns an empty String.
 fn branch_name(repo: &Repository) -> String {
     match repo.head() {
         Ok(head) => head.shorthand().unwrap().to_string(),
@@ -88,6 +125,9 @@ fn branch_name(repo: &Repository) -> String {
     }
 }
 
+/// Determines if the repository is in a dirty state, ignoring
+/// any files listed in .gitignore. Untracked files are also
+/// considered a dirty state.
 fn is_dirty(repo: &Repository) -> bool {
     let mut options = StatusOptions::new();
     options.include_untracked(true);
@@ -126,15 +166,7 @@ fn is_ahead_behind_remote(repo: &Repository) -> (bool, bool) {
 /// If the --shorten flag is set however, the non-current directories in the
 /// path will be shortened to their first character.
 crate fn render(sub_matchings: &ArgMatches<'_>) {
-    let mut precmd = PrePrompt {
-        path: String::from(""),
-        user_name: String::from(""),
-        host: String::from(""),
-        vcs_branch: String::from(""),
-        vcs_is_dirty: false,
-        vcs_is_behind_remote: false,
-        vcs_is_ahead_of_remote: false,
-    };
+    let mut precmd = PrePrompt::new();
 
     let shorten = sub_matchings.is_present("shorten");
     let working_dir = env::current_dir().unwrap();
@@ -143,14 +175,16 @@ crate fn render(sub_matchings: &ArgMatches<'_>) {
         _ => String::from(""),
     };
     precmd.path = format_path(working_dir.to_str().unwrap(), &home_dir, shorten);
+    precmd.ssh_info = get_ssh_info();
 
-    if let Some(repo) = Repository::discover(".").ok() {
-        precmd.vcs_branch = branch_name(&repo);
-        precmd.vcs_is_dirty = is_dirty(&repo);
-
+    if let Ok(repo) = Repository::discover(".") {
         let (ahead, behind) = is_ahead_behind_remote(&repo);
-        precmd.vcs_is_ahead_of_remote = ahead;
-        precmd.vcs_is_behind_remote = behind;
+        precmd.vcs_info = Some(VcsInfo {
+            branch: branch_name(&repo),
+            is_dirty: is_dirty(&repo),
+            is_behind_remote: behind,
+            is_ahead_of_remote: ahead,
+        });
     }
 
     print!("{}", precmd);
@@ -163,36 +197,14 @@ mod tests {
     use std::path::Path;
     use tempdir::TempDir;
 
+    ////////////////////////////////////////////////////////////////////////////////
+    // PrePrompt formatting tests
+    ////////////////////////////////////////////////////////////////////////////////
+
     #[test]
     fn pre_prompt_only_path_prints_just_the_path() {
-        let precmd = PrePrompt {
-            path: String::from("~/some/dir"),
-            user_name: String::from(""),
-            host: String::from(""),
-            vcs_branch: String::from(""),
-            vcs_is_dirty: false,
-            vcs_is_behind_remote: false,
-            vcs_is_ahead_of_remote: false,
-        };
-
-        assert_eq!(
-            format!("{}", Blue.paint("~/some/dir")),
-            format!("{}", precmd)
-        );
-    }
-
-    #[test]
-    fn pre_prompt_prints_just_path_when_only_has_username() {
-        let precmd = PrePrompt {
-            path: String::from("~/some/dir"),
-            user_name: String::from("user_name"),
-            host: String::from(""),
-            vcs_branch: String::from(""),
-            vcs_is_dirty: false,
-            vcs_is_behind_remote: false,
-            vcs_is_ahead_of_remote: false,
-        };
-
+        let mut precmd = PrePrompt::new();
+        precmd.path = String::from("~/some/dir");
         assert_eq!(
             format!("{}", Blue.paint("~/some/dir")),
             format!("{}", precmd)
@@ -201,15 +213,12 @@ mod tests {
 
     #[test]
     fn pre_prompt_prints_user_name_and_host() {
-        let precmd = PrePrompt {
-            path: String::from("~"),
-            user_name: String::from("user"),
+        let mut precmd = PrePrompt::new();
+        precmd.path = String::from("~");
+        precmd.ssh_info = Some(SshInfo {
+            user: String::from("user"),
             host: String::from("host"),
-            vcs_branch: String::from(""),
-            vcs_is_dirty: false,
-            vcs_is_behind_remote: false,
-            vcs_is_ahead_of_remote: false,
-        };
+        });
 
         assert_eq!(
             format!("{} {}", Blue.paint("~"), Fixed(242).paint("user@host")),
@@ -219,15 +228,18 @@ mod tests {
 
     #[test]
     fn pre_prompt_prints_branch_name() {
-        let precmd = PrePrompt {
-            path: String::from("~"),
-            user_name: String::from("user"),
+        let mut precmd = PrePrompt::new();
+        precmd.path = String::from("~");
+        precmd.ssh_info = Some(SshInfo {
+            user: String::from("user"),
             host: String::from("host"),
-            vcs_branch: String::from("master"),
-            vcs_is_dirty: false,
-            vcs_is_behind_remote: false,
-            vcs_is_ahead_of_remote: false,
-        };
+        });
+        precmd.vcs_info = Some(VcsInfo {
+            branch: String::from("master"),
+            is_dirty: false,
+            is_behind_remote: false,
+            is_ahead_of_remote: false,
+        });
 
         assert_eq!(
             format!(
@@ -240,52 +252,73 @@ mod tests {
         );
     }
 
+    ////////////////////////////////////////////////////////////////////////////////
+    // VcsInfo formatting tests
+    ////////////////////////////////////////////////////////////////////////////////
+
     #[test]
-    fn pre_prompt_prints_dirty() {
-        let precmd = PrePrompt {
-            path: String::from("~"),
-            user_name: String::from("user"),
-            host: String::from("host"),
-            vcs_branch: String::from("master"),
-            vcs_is_dirty: true,
-            vcs_is_behind_remote: false,
-            vcs_is_ahead_of_remote: false,
+    fn vcs_info_prints_dirty_repo() {
+        let vcs = VcsInfo {
+            branch: String::from("master"),
+            is_dirty: true,
+            is_behind_remote: false,
+            is_ahead_of_remote: false,
         };
 
         assert_eq!(
-            format!(
-                "{} {} {}",
-                Blue.paint("~"),
-                Fixed(242).paint("master*"),
-                Fixed(242).paint("user@host")
-            ),
-            format!("{}", precmd)
+            format!("{}", Fixed(242).paint("master*")),
+            format!("{}", vcs)
+        );
+    }
+
+    #[test]
+    fn vcs_info_prints_behind_remote() {
+        let vcs = VcsInfo {
+            branch: String::from("master"),
+            is_dirty: false,
+            is_behind_remote: true,
+            is_ahead_of_remote: false,
+        };
+
+        assert_eq!(
+            format!("{} {}", Fixed(242).paint("master"), Cyan.paint("⇣")),
+            format!("{}", vcs)
+        );
+    }
+
+    #[test]
+    fn vcs_info_prints_ahead_of_remote() {
+        let vcs = VcsInfo {
+            branch: String::from("master"),
+            is_dirty: false,
+            is_behind_remote: false,
+            is_ahead_of_remote: true,
+        };
+
+        assert_eq!(
+            format!("{} {}", Fixed(242).paint("master"), Cyan.paint("⇡")),
+            format!("{}", vcs)
         );
     }
 
     #[test]
     fn pre_prompt_prints_dirty_upstream_downstream() {
-        let precmd = PrePrompt {
-            path: String::from("~"),
-            user_name: String::from("user"),
-            host: String::from("host"),
-            vcs_branch: String::from("master"),
-            vcs_is_dirty: true,
-            vcs_is_behind_remote: true,
-            vcs_is_ahead_of_remote: true,
+        let vcs = VcsInfo {
+            branch: String::from("master"),
+            is_dirty: true,
+            is_behind_remote: true,
+            is_ahead_of_remote: true,
         };
 
         assert_eq!(
-            format!(
-                "{} {} {} {}",
-                Blue.paint("~"),
-                Fixed(242).paint("master*"),
-                Cyan.paint("⇣⇡"),
-                Fixed(242).paint("user@host")
-            ),
-            format!("{}", precmd)
+            format!("{} {}", Fixed(242).paint("master*"), Cyan.paint("⇣⇡")),
+            format!("{}", vcs)
         );
     }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Path name tests
+    ////////////////////////////////////////////////////////////////////////////////
 
     #[test]
     fn format_path_home_is_shortened() {
@@ -302,6 +335,10 @@ mod tests {
         assert_eq!(long, "~/R/l/path");
     }
 
+    ////////////////////////////////////////////////////////////////////////////////
+    // Git tests
+    ////////////////////////////////////////////////////////////////////////////////
+
     #[test]
     fn branch_name_uses_master_with_brand_new_repo() {
         let (_td, repo) = temp_repo();
@@ -313,12 +350,13 @@ mod tests {
     fn branch_name_returns_correct_name() {
         let (_td, repo) = temp_repo();
         init_repo(&repo);
-        let branch =
-            repo.branch(
+        let branch = repo
+            .branch(
                 "test_branch",
                 &repo.head().unwrap().peel_to_commit().unwrap(),
                 false,
-            ).unwrap();
+            )
+            .unwrap();
         repo.set_head("refs/heads/test_branch").unwrap();
         repo.checkout_head(None).unwrap();
         assert!(branch.is_head());
@@ -365,19 +403,21 @@ mod tests {
         init_repo(&repo);
 
         // Make a "local" branch
-        let mut local =
-            repo.branch(
+        let mut local = repo
+            .branch(
                 "local_branch",
                 &repo.head().unwrap().peel_to_commit().unwrap(),
                 false,
-            ).unwrap();
+            )
+            .unwrap();
 
         // Make a "remote" branch
         repo.branch(
             "remote_branch",
             &repo.head().unwrap().peel_to_commit().unwrap(),
             false,
-        ).unwrap();
+        )
+        .unwrap();
         repo.set_head("refs/heads/remote_branch").unwrap();
         repo.checkout_head(None).unwrap();
 
