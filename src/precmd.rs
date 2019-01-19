@@ -7,6 +7,7 @@ use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
+use std::process::Command;
 use tico::tico;
 
 #[derive(Debug, PartialEq)]
@@ -153,21 +154,16 @@ fn branch_name(repo: &Repository) -> String {
 
 /// Determines if the repository is in a dirty state, ignoring any files listed in .gitignore.
 /// Untracked files are also considered a dirty state.
-fn is_dirty(repo: &Repository) -> bool {
-    let mut options = StatusOptions::new();
-    options.include_untracked(true);
-
-    let statuses = match repo.statuses(Some(&mut options)) {
-        Ok(statuses) => statuses,
-        Err(_) => return false,
-    };
-
-    let mut clean_status = Status::empty();
-    clean_status.toggle(Status::CURRENT);
-    clean_status.toggle(Status::IGNORED);
-    statuses
-        .iter()
-        .any(|entry| !entry.status().is_empty() && !entry.status().intersects(clean_status))
+fn is_dirty() -> bool {
+    // Note: we use a subprocess here since the underlying libgit2 library's git status call is
+    // extremely slow (6x as slow in some cases). This appears to be due to the fact that it is not
+    // multithreaded and unfortunately git2-rs only implements Send for the Repository object
+    // effectively making multithreaded status checks over all files in the tree slower than a
+    // single thread dealing with context switching and one mutex across all threads.
+    match Command::new("git").args(&["diff", "--no-ext-diff", "--quiet", "--exit-code"]).status() {
+        Ok(code) => !code.success(),
+        Err(_) => false
+    }
 }
 
 /// Determine if the current HEAD is ahead/behind its remote. The tuple returned will be in the
@@ -206,7 +202,7 @@ crate fn render(sub_matchings: &ArgMatches<'_>) {
         let (ahead, behind) = is_ahead_behind_remote(&repo);
         precmd.vcs_info = Some(VcsInfo {
             branch: branch_name(&repo),
-            is_dirty: is_dirty(&repo),
+            is_dirty: is_dirty(),
             is_behind_remote: behind,
             is_ahead_of_remote: ahead,
         });
